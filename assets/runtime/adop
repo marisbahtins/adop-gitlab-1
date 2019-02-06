@@ -1,6 +1,58 @@
 #!/bin/bash
 set -e
 
+echo "Loading ${GITLAB_RUNTIME_DIR}/env-defaults"
+source ${GITLAB_RUNTIME_DIR}/env-defaults
+
+LOCAL_GITLAB_HOST="http://127.0.0.1:80${GITLAB_RELATIVE_URL_ROOT}"
+
+
+echo "--------------------------------------------------------------------------------------"
+echo "============================ CHECKING GITLAB IS AVAILABLE ============================"
+echo "--------------------------------------------------------------------------------------"
+
+pretty_sleep() {
+  secs=${1:-60}
+  tool=${2:-service}
+  while [ $secs -gt 0 ]; do
+    echo -ne "$tool unavailable, sleeping for: $secs\033[0Ks\r"
+    sleep 1
+    : $((secs--))
+  done
+  echo "$tool was unavailable, so slept for: ${1:-60} secs"
+}
+
+# Check that Gitlab service has started up and is running healthily
+echo "* Waiting for GitLab to become available - this can take a few minutes"
+TOOL_SLEEP_TIME=10
+until [[ $(curl -s ${LOCAL_GITLAB_HOST}/-/health) == 'GitLab OK' ]]; do pretty_sleep ${TOOL_SLEEP_TIME} GitLab; done
+
+echo "----------------------------------------------------------------------------"
+echo "============================ CONFIGURING GITLAB ============================"
+echo "----------------------------------------------------------------------------"
+
+
+# Log-in as the LDAP users so they are visible to the root account
+echo "1/4 Validating users.."
+validate_as_ldap_user ${LOCAL_GITLAB_HOST} ${INITIAL_ADMIN_USER} ${INITIAL_ADMIN_PASSWORD}
+validate_as_ldap_user ${LOCAL_GITLAB_HOST} ${JENKINS_USER} ${JENKINS_PASSWORD}
+
+# Generate an API token for the root user to make API calls
+echo "2/4 Generating root admin access token."
+generate_root_access_token ${LOCAL_GITLAB_HOST} ${GITLAB_ROOT_EMAIL} ${GITLAB_ROOT_PASSWORD}
+
+# Make the LDAP users admins in GitLab
+echo "3/4 Granting users admin permission."
+source ${GITLAB_INSTALL_DIR}/secret
+make_ldap_user_as_admins ${LOCAL_GITLAB_HOST} ${personal_access_token} ${INITIAL_ADMIN_USER}
+make_ldap_user_as_admins ${LOCAL_GITLAB_HOST} ${personal_access_token} ${JENKINS_USER}
+rm -f ${GITLAB_INSTALL_DIR}/secret
+
+echo "----------------------------------------------------------------------------"
+echo "===================== GITLAB CONFIGURATION IS COMPLETE ======================"
+echo "----------------------------------------------------------------------------"
+
+
 # Script from https://gist.github.com/michaellihs/5ef5e8dbf48e63e2172a573f7b32c638
 # Generates a personal access token for the API as the root user
 generate_root_access_token() {
@@ -34,7 +86,7 @@ generate_root_access_token() {
     # 5. Scrape the personal access token from the response HTML
     personal_access_token=$(echo $body_header | perl -ne 'print "$1\n" if /created-personal-access-token"[[:blank:]]value="(.+?)"/' | sed -n 1p)
     # Return token
-    echo "export root_api_token=${personal_access_token}" > /assets/secret
+    echo "export root_api_token=${personal_access_token}" > ${GITLAB_INSTALL_DIR}/secret
 }
 
 # Create personal access token from previous script to generate root api token
@@ -57,34 +109,6 @@ make_ldap_user_as_admins() {
         "${GITLAB_HOST}/api/v4/users/${id}?admin=true"
 
     echo "${USER} user is now an admin in Gitlab"
-}
-
-# Set the root password, bypassing the password reset screen
-set_root_password() {
-    local GITLAB_HOST=${1}
-    local PASS=${2}
-
-    body_header=$(curl -v -L -H "Content-Type: application/json" -c cookies.txt -i "${GITLAB_HOST}" -s)
-
-    # Generating the CSRF token and password reset tokens required by GitLab
-    echo "[Token generation script]: Extracting the CSRF token from the login page..."
-    csrf_token=$(echo $body_header | perl -ne 'print "$1\n" if /new_user.*?authenticity_token"[[:blank:]]value="(.+?)"/')
-
-    echo "[Token generation script]: Extracted the CSRF token for the login page: $csrf_token"
-    reset_password_token=$(echo $body_header | perl -ne 'print "$1\n" if /input[[:blank:]]type="hidden"[[:blank:]]value="(.+?)"/')
-
-    echo "[Token generation script]: Extracted the password token for the login page: $reset_password_token"
-
-    # Curls the password reset with the provided tokens. Refreshing GitLab will now re-direct to the standard sign-on.
-    # Also changes the root password to the INITIAL_ADMIN_PASSWORD variable
-    curl -L -X POST -H "application/x-www-form-urlencoded" \
-        -b cookies.txt \
-        -c cookies.txt \
-        -i "${GITLAB_HOST}/users/password" \
-        --data-urlencode "authenticity_token=${csrf_token}" \
-        --data "_method=put&user[reset_password_token]=${reset_password_token}&user[password]=${PASS}&[password_confirmation]=${PASS}"
-
-    # Returns a 400 code but does successfully reset the password for root account.
 }
 
 # Script heavily based on https://gist.github.com/michaellihs/5ef5e8dbf48e63e2172a573f7b32c638
@@ -111,3 +135,5 @@ validate_as_ldap_user() {
 
     echo "${USER} user logged in"
 }
+
+echo "DONE======="

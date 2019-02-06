@@ -1,9 +1,10 @@
-FROM gitlab/gitlab-ce:11.4.5-ce.0
+FROM sameersbn/gitlab:11.7.3
 
 LABEL maintainer="jonathan.e.jarvis@accenture.com"
 
-COPY resources/assets/ /assets/
+COPY assets/runtime/ ${GITLAB_RUNTIME_DIR}/
+COPY wrapper.sh /sbin/wrapper.sh
+RUN chmod 755 /sbin/wrapper.sh
 
-# Execute configuration scripts
-RUN chmod +x -R /assets/wrapper
-CMD ["/assets/wrapper"]
+ENTRYPOINT ["/sbin/wrapper.sh"]
+CMD ["app:start"]
